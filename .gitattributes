@@ -1,0 +1,20 @@
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.zip  binary
+*.pdf  binary
+*.xlsx binary
+*.xls  binary
+*.docx binary
+*.n64  binary
+*.z64  binary
+*.v64  binary
+*.rom  binary
+*.bin  binary
