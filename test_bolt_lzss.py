@@ -249,6 +249,35 @@ class TestReferencePlanning(unittest.TestCase):
             checked += 1
         self.assertGreater(checked, 1000)
 
+    def test_every_representable_reference_at_least_breaks_even(self):
+        """A back-reference can never make the stream bigger.
+
+        This falls straight out of the op_count bias and is the format's
+        quietest design decision.  A reference preceded by k extension bytes
+        costs k + 1 bytes, and its shortest expressible length is k + 2,
+        because op_count credits every one of those bytes back to the run.
+        So the worst a legal match can do is save one byte against spelling
+        the same span out as literals.
+        """
+        for dist in list(range(1, 200)) + [1000, 1024, 4096, 65536, 1 << 20]:
+            for length in range(2, 300):
+                cost = B.reference_cost(dist, length)
+                if cost is None:
+                    continue
+                self.assertLessEqual(cost, length - 1,
+                                     f"dist={dist} len={length} cost={cost}")
+
+    def test_length_floor_matches_the_distance_class(self):
+        """Each extension byte a distance needs raises the minimum length."""
+        # (largest distance needing k extension bytes, resulting floor)
+        for max_dist, floor in ((16, 2), (1024, 3), (65536, 4),
+                                (1 << 22, 5)):
+            self.assertIsNotNone(B.reference_cost(max_dist, floor),
+                                 f"dist={max_dist} len={floor}")
+            if floor > 2:
+                self.assertIsNone(B.reference_cost(max_dist, floor - 1),
+                                  f"dist={max_dist} len={floor - 1}")
+
     def test_cost_never_exceeds_the_extension_budget(self):
         # Nothing in a 32 MiB address space should need more than a handful
         # of extension bytes.
@@ -346,6 +375,48 @@ class TestStoreBaseline(unittest.TestCase):
             self.assertEqual(B.decode(blob, n), data)
             # one control byte plus one extension byte buys a 512-byte run
             self.assertLessEqual(len(blob), n + 2 * (n // 512 + 1))
+
+
+class TestCompressionQuality(unittest.TestCase):
+    """Not correctness, but properties a sane encoder has to satisfy."""
+
+    def test_optimal_never_loses_to_the_baseline(self):
+        for data, name in _corpus():
+            with self.subTest(case=name):
+                self.assertLessEqual(len(B.encode(data, B.LEVEL_OPTIMAL)),
+                                     len(B.encode(data, B.LEVEL_STORE)))
+
+    def test_higher_levels_are_not_worse_on_aggregate(self):
+        totals = {level: 0 for level in LEVELS}
+        for data, _name in _corpus():
+            for level in LEVELS:
+                totals[level] += len(B.encode(data, level=level))
+        self.assertLess(totals[B.LEVEL_GREEDY], totals[B.LEVEL_STORE])
+        self.assertLessEqual(totals[B.LEVEL_LAZY], totals[B.LEVEL_GREEDY])
+        self.assertLess(totals[B.LEVEL_OPTIMAL], totals[B.LEVEL_LAZY])
+
+    def test_incompressible_data_barely_expands(self):
+        rng = random.Random(4242)
+        data = bytes(rng.getrandbits(8) for _ in range(200000))
+        blob = B.encode(data, B.LEVEL_OPTIMAL)
+        # a single literal run costs the payload plus a control byte plus a
+        # handful of extension bytes; random data will find a few short
+        # matches too, so just require it not to blow up
+        self.assertLess(len(blob), len(data) * 1.01)
+        self.assertEqual(B.decode(blob, len(data)), data)
+
+    def test_repetitive_data_compresses_hard(self):
+        data = b"StarCraft 64 " * 4000
+        blob = B.encode(data, B.LEVEL_OPTIMAL)
+        self.assertEqual(B.decode(blob, len(data)), data)
+        self.assertLess(len(blob), len(data) // 100)
+
+    def test_single_byte_repeat_becomes_one_long_run(self):
+        data = b"\xa5" * 60000
+        blob = B.encode(data, B.LEVEL_OPTIMAL)
+        self.assertEqual(B.decode(blob, len(data)), data)
+        # one literal plus a handful of bytes of overlapping back-reference
+        self.assertLess(len(blob), 24)
 
 
 # ---------------------------------------------------------------------------
