@@ -466,6 +466,57 @@ class TestAgainstRom(unittest.TestCase):
                         plain)
 
 
+@unittest.skipIf(_sc64_decoder() is None,
+                 "no reference decoder: set SC64_MAPS to the sc64-maps repo")
+class TestEncoderAgainstReferenceDecoder(unittest.TestCase):
+    """Have an independent decoder read what this encoder writes.
+
+    A round-trip proves only that this encoder and this decoder agree. If
+    both share a misreading of the format, the round-trip still passes and
+    the output is still wrong. Feeding the encoder's streams to sc64-maps'
+    separately written decoder is the check that closes that hole -- it is
+    the direction that actually matters, because it is the direction a real
+    consumer of these streams would take.
+    """
+
+    def _reference_decode(self, blob: bytes, size: int) -> bytes:
+        """Decode `blob` with sc64-maps' decoder.
+
+        Its decoder reads out of a ROM image at an archive-relative offset,
+        so wrap the stream in the smallest thing that looks like one: the
+        BOLT magic, a 12-byte header, then the payload at offset 16.
+        """
+        ref_cls = _sc64_decoder()
+        fake = b"BOLT" + bytes(12) + blob
+        archive = ref_cls.__new__(ref_cls)
+        archive.rom = fake
+        archive.base = 0
+        return archive._decompress(16, size, size)
+
+    def test_reference_decoder_reads_our_streams(self):
+        for level in LEVELS:
+            for data, name in _corpus():
+                if not data:
+                    continue
+                with self.subTest(level=level, case=name, size=len(data)):
+                    blob = B.encode(data, level=level)
+                    self.assertEqual(self._reference_decode(blob, len(data)),
+                                     data)
+
+    @unittest.skipIf(_rom_path() is None,
+                     "no ROM: set BOLT_ROM or pass --rom PATH")
+    def test_reference_decoder_reads_our_reencoded_rom_entries(self):
+        archive = _archive()
+        self.assertIsNotNone(archive)
+        for entry in _sample_entries(25, seed=99):
+            plain = archive.read(entry)
+            for level in LEVELS:
+                with self.subTest(level=level, entry=entry.path):
+                    blob = B.encode(plain, level=level)
+                    self.assertEqual(self._reference_decode(blob, len(plain)),
+                                     plain)
+
+
 @unittest.skipIf(_rom_path() is None,
                  "no ROM: set BOLT_ROM or pass --rom PATH")
 @unittest.skipIf(_sc64_decoder() is None,
