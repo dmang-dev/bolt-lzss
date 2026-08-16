@@ -127,10 +127,6 @@ class BoltArchive:
         size, data_off, file_hash = struct.unpack_from(">III", b, 4)
         return BoltEntry(path, b[0], b[3], size, data_off, file_hash)
 
-    def raw(self, entry: BoltEntry) -> memoryview:
-        """The entry's bytes as they sit in the ROM, still compressed."""
-        return memoryview(self.rom)[self.base + entry.offset:]
-
     def read(self, entry: BoltEntry) -> bytes:
         """Decompress (or copy) an entry using this project's own decoder."""
         import bolt_lzss

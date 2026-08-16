@@ -49,6 +49,8 @@ def main(argv=None) -> int:
                     help="how many compressed entries to test (0 = all)")
     ap.add_argument("--max-size", type=int, default=0,
                     help="skip entries larger than this many bytes (0 = no cap)")
+    ap.add_argument("--min-size", type=int, default=0,
+                    help="skip entries smaller than this many bytes")
     ap.add_argument("--seed", type=int, default=20240607)
     ap.add_argument("--all-levels", action="store_true",
                     help="run every level over the same sample")
@@ -65,6 +67,8 @@ def main(argv=None) -> int:
     entries = [e for e in archive.entries() if not e.stored]
     if args.max_size:
         entries = [e for e in entries if e.size <= args.max_size]
+    if args.min_size:
+        entries = [e for e in entries if e.size >= args.min_size]
     if args.sample and len(entries) > args.sample:
         entries = random.Random(args.seed).sample(entries, args.sample)
     entries.sort(key=lambda e: e.path)

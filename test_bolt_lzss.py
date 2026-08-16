@@ -516,5 +516,16 @@ class TestDifferentialDecode(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(argv=[a for a in sys.argv if a != "--rom"
-                        and not os.path.isfile(a)])
+    # Strip "--rom PATH" so unittest does not try to interpret it as a test
+    # name.  argv[0] has to survive: unittest reads it as the program name.
+    _argv = [sys.argv[0]]
+    _skip = False
+    for _arg in sys.argv[1:]:
+        if _skip:
+            _skip = False
+            continue
+        if _arg == "--rom":
+            _skip = True
+            continue
+        _argv.append(_arg)
+    unittest.main(argv=_argv)

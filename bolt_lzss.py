@@ -105,15 +105,22 @@ Licence: GPL-3.0-or-later.  See LICENSE and the README for why.
 
 from __future__ import annotations
 
+from collections import deque
+
 __all__ = [
     "decode",
+    "decoded_length",
     "encode",
+    "reference_cost",
+    "literal_cost",
     "BoltLZSSError",
     "LEVEL_STORE",
     "LEVEL_GREEDY",
     "LEVEL_LAZY",
     "LEVEL_OPTIMAL",
+    "ALL_LEVELS",
     "DEFAULT_LEVEL",
+    "MIN_MATCH",
 ]
 
 __version__ = "1.0.0"
@@ -367,6 +374,7 @@ def _plan_reference(dist: int, length: int):
 # has a very high hit rate -- there are only a couple of dozen distinct widths
 # in any realistic window.
 _COST_CACHE: dict[tuple[int, int], int | None] = {}
+_COST_CACHE_LIMIT = 1 << 20
 _MISS = object()
 
 
@@ -375,6 +383,10 @@ def _cost_by_off_bits(bits_off: int, length: int) -> int | None:
     hit = _COST_CACHE.get(key, _MISS)
     if hit is not _MISS:
         return hit
+    if len(_COST_CACHE) >= _COST_CACHE_LIMIT:
+        # The cache is a pure memo, so dropping it costs only time.  It only
+        # ever gets this big if a caller sweeps a very wide range of lengths.
+        _COST_CACHE.clear()
 
     result = None
     for k in range(0, _MAX_EXT + 1):
@@ -459,13 +471,17 @@ DEFAULT_NICE_LEN = 128
 _LEN_DETAIL = 48
 
 
-def _match_len(data, a: int, b: int, limit: int) -> int:
+def _match_len(view, data, a: int, b: int, limit: int) -> int:
     """Length of the common prefix of data[a:] and data[b:], capped at limit.
 
-    Compares in doubling slices so the byte loop stays in C.  Overlapping
-    ranges (b - a < limit) are fine and are exactly how a run is found: the
-    decoder copies one byte at a time, so a match may legally extend past its
-    own distance.
+    Compares in doubling slices so the byte loop stays in C.  `view` is a
+    memoryview of the same buffer: slicing it is O(1) where slicing `bytes`
+    would copy, which matters because a long run gets measured at every
+    position inside it.
+
+    Overlapping ranges (b - a < limit) are fine, and are exactly how a run is
+    found: the decoder copies one byte at a time, so a match may legally
+    extend past its own distance.
     """
     if limit <= 0:
         return 0
@@ -473,7 +489,7 @@ def _match_len(data, a: int, b: int, limit: int) -> int:
     step = 8
     while n < limit:
         m = step if step < limit - n else limit - n
-        if data[a + n:a + n + m] == data[b + n:b + n + m]:
+        if view[a + n:a + n + m] == view[b + n:b + n + m]:
             n += m
             step += step
         else:
@@ -495,6 +511,7 @@ class _MatchFinder:
     def __init__(self, data: bytes, max_dist: int, max_chain: int,
                  nice_len: int, max_len: int):
         self.data = data
+        self.view = memoryview(data)
         self.n = len(data)
         self.max_dist = max_dist
         self.max_chain = max_chain
@@ -530,6 +547,7 @@ class _MatchFinder:
         if limit < MIN_MATCH:
             return []
 
+        view = self.view
         out = []
         best_len = MIN_MATCH - 1
 
@@ -541,7 +559,7 @@ class _MatchFinder:
         for d in range(1, near + 1):
             p = pos - d
             if data[p] == first and (limit < 2 or data[p + 1] == second):
-                ln = _match_len(data, p, pos, limit)
+                ln = _match_len(view, data, p, pos, limit)
                 if ln >= MIN_MATCH:
                     out.append((ln, d))
                     best_len = ln
@@ -554,7 +572,7 @@ class _MatchFinder:
             while p >= 0 and p >= floor and chain > 0:
                 chain -= 1
                 if best_len < limit and data[p + best_len] == data[pos + best_len]:
-                    ln = _match_len(data, p, pos, limit)
+                    ln = _match_len(view, data, p, pos, limit)
                     if ln > best_len:
                         out.append((ln, pos - p))
                         best_len = ln
@@ -587,8 +605,8 @@ class _MatchFinder:
 # ---------------------------------------------------------------------------
 
 LEVEL_STORE = 0     # literal runs only; the trivially correct baseline
-LEVEL_GREEDY = 1    # hash-chain match finding, take the longest match
-LEVEL_LAZY = 2      # greedy plus one-byte lookahead
+LEVEL_GREEDY = 1    # hash chains, take the most profitable match at each step
+LEVEL_LAZY = 2      # greedy plus one byte of lookahead
 LEVEL_OPTIMAL = 3   # shortest-path parse over the real cost model
 
 DEFAULT_LEVEL = LEVEL_OPTIMAL
@@ -755,8 +773,6 @@ def _encode_optimal(data: bytes, finder: _MatchFinder) -> bytes:
         together, through op_count, so `reference_cost` has to be consulted
         per candidate rather than assumed monotone.
     """
-    from collections import deque
-
     n = len(data)
     inf = float("inf")
     best = [inf] * (n + 1)
