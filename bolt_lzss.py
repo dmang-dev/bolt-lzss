@@ -362,12 +362,46 @@ def _plan_reference(dist: int, length: int):
     return None
 
 
+# The cost of a reference depends on the distance only through how many bits
+# the offset accumulator needs, so a cache keyed on that width plus the length
+# has a very high hit rate -- there are only a couple of dozen distinct widths
+# in any realistic window.
+_COST_CACHE: dict[tuple[int, int], int | None] = {}
+_MISS = object()
+
+
+def _cost_by_off_bits(bits_off: int, length: int) -> int | None:
+    key = (bits_off, length)
+    hit = _COST_CACHE.get(key, _MISS)
+    if hit is not _MISS:
+        return hit
+
+    result = None
+    for k in range(0, _MAX_EXT + 1):
+        rest = length - k - 2
+        if rest < 0:
+            break
+        bits_run = (rest >> BITS_REF_LEN).bit_length()
+        for n_dual in range(0, k + 1):
+            need_off = max(0, bits_off - BITS_DUAL * n_dual)
+            need_run = max(0, bits_run - BITS_DUAL * n_dual)
+            if (-(-need_off // BITS_OFF_EXT)
+                    + -(-need_run // BITS_RUN_EXT) + n_dual) <= k:
+                result = k + 1
+                break
+        if result is not None:
+            break
+
+    _COST_CACHE[key] = result
+    return result
+
+
 def reference_cost(dist: int, length: int) -> int | None:
     """Encoded size in bytes of a back-reference, or None if unrepresentable."""
-    plan = _plan_reference(dist, length)
-    if plan is None:
+    if dist < 1 or length < MIN_MATCH:
         return None
-    return plan[0] + plan[1] + plan[2] + 1
+    return _cost_by_off_bits(((dist - 1) >> BITS_REF_DIST).bit_length(),
+                             length)
 
 
 def _emit_reference(out: bytearray, dist: int, length: int) -> None:
@@ -396,6 +430,159 @@ def _emit_reference(out: bytearray, dist: int, length: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Match finding
+# ---------------------------------------------------------------------------
+
+_HASH_BITS = 16
+_HASH_SIZE = 1 << _HASH_BITS
+_HASH_MASK = _HASH_SIZE - 1
+
+# Distances above this are never searched.  Six offset-extension bytes could
+# express far more, but nothing in a cartridge needs it.
+DEFAULT_MAX_DIST = 1 << 22
+
+# Longest match the finder will bother measuring.
+DEFAULT_MAX_LEN = 1 << 16
+
+# How many chain links to walk before giving up on a position.
+DEFAULT_MAX_CHAIN = 64
+
+# Stop walking the chain once a match this long turns up.
+DEFAULT_NICE_LEN = 128
+
+# How many lengths past the previous candidate the finder enumerates one by
+# one before it jumps straight to the longest match available.  Truncating a
+# match is only ever useful to line the next operation up with something
+# better, which in practice means shaving a few bytes, and cost(d, l) sits in
+# wide plateaus, so enumerating hundreds of lengths costs time and buys
+# almost nothing.
+_LEN_DETAIL = 48
+
+
+def _match_len(data, a: int, b: int, limit: int) -> int:
+    """Length of the common prefix of data[a:] and data[b:], capped at limit.
+
+    Compares in doubling slices so the byte loop stays in C.  Overlapping
+    ranges (b - a < limit) are fine and are exactly how a run is found: the
+    decoder copies one byte at a time, so a match may legally extend past its
+    own distance.
+    """
+    if limit <= 0:
+        return 0
+    n = 0
+    step = 8
+    while n < limit:
+        m = step if step < limit - n else limit - n
+        if data[a + n:a + n + m] == data[b + n:b + n + m]:
+            n += m
+            step += step
+        else:
+            break
+    # refine the failing chunk one byte at a time
+    while n < limit and data[a + n] == data[b + n]:
+        n += 1
+    return n
+
+
+class _MatchFinder:
+    """Hash chains over three-byte prefixes, plus a short scan for pairs.
+
+    Two-byte matches matter in this format -- one costs a single byte at a
+    distance of 16 or less -- but they are far too common to hash, so they
+    are found by a bounded backward scan instead.
+    """
+
+    def __init__(self, data: bytes, max_dist: int, max_chain: int,
+                 nice_len: int, max_len: int):
+        self.data = data
+        self.n = len(data)
+        self.max_dist = max_dist
+        self.max_chain = max_chain
+        self.nice_len = nice_len
+        self.max_len = max_len
+        self.head = [-1] * _HASH_SIZE
+        self.prev = [-1] * (self.n + 1)
+
+    def _hash(self, pos: int) -> int:
+        d = self.data
+        return ((d[pos] << 10) ^ (d[pos + 1] << 5) ^ d[pos + 2]) & _HASH_MASK
+
+    def insert(self, pos: int) -> None:
+        if pos + 2 < self.n:
+            h = self._hash(pos)
+            self.prev[pos] = self.head[h]
+            self.head[h] = pos
+
+    def find(self, pos: int, detail: int = _LEN_DETAIL):
+        """Candidate matches at `pos`, as a list of (length, distance).
+
+        For every achievable length up to `detail` the *smallest* distance is
+        reported, because a shorter distance is never more expensive.  The
+        single longest match is always included even when it exceeds
+        `detail`.
+        """
+        if pos == 0 or pos >= self.n:
+            return []
+        data = self.data
+        limit = self.max_len
+        if limit > self.n - pos:
+            limit = self.n - pos
+        if limit < MIN_MATCH:
+            return []
+
+        out = []
+        best_len = MIN_MATCH - 1
+
+        # Two-byte matches: only worth anything within 16 bytes, where they
+        # cost one byte.  Walk backwards and take the first hit.
+        near = pos if pos < MAX_PLAIN_LITERAL else MAX_PLAIN_LITERAL
+        first = data[pos]
+        second = data[pos + 1] if limit >= 2 else None
+        for d in range(1, near + 1):
+            p = pos - d
+            if data[p] == first and (limit < 2 or data[p + 1] == second):
+                ln = _match_len(data, p, pos, limit)
+                if ln >= MIN_MATCH:
+                    out.append((ln, d))
+                    best_len = ln
+                break
+
+        if limit >= 3 and pos + 2 < self.n:
+            p = self.head[self._hash(pos)]
+            chain = self.max_chain
+            floor = pos - self.max_dist
+            while p >= 0 and p >= floor and chain > 0:
+                chain -= 1
+                if best_len < limit and data[p + best_len] == data[pos + best_len]:
+                    ln = _match_len(data, p, pos, limit)
+                    if ln > best_len:
+                        out.append((ln, pos - p))
+                        best_len = ln
+                        if ln >= self.nice_len:
+                            break
+                p = self.prev[p]
+
+        if not out:
+            return []
+
+        # `out` holds strictly increasing lengths, each paired with the
+        # smallest distance that reaches it.  Expand into per-length
+        # candidates so the parser may choose a shorter match at a cheaper
+        # distance, but stop enumerating after `detail` steps per group and
+        # jump to the group's full length.
+        expanded = []
+        prev_len = MIN_MATCH - 1
+        for ln, dist in out:
+            top = ln if ln < prev_len + detail else prev_len + detail
+            for length in range(prev_len + 1, top + 1):
+                expanded.append((length, dist))
+            if ln > top:
+                expanded.append((ln, dist))
+            prev_len = ln
+        return expanded
+
+
+# ---------------------------------------------------------------------------
 # Encoder -- entry point
 # ---------------------------------------------------------------------------
 
@@ -406,22 +593,224 @@ LEVEL_OPTIMAL = 3   # shortest-path parse over the real cost model
 
 DEFAULT_LEVEL = LEVEL_OPTIMAL
 
+ALL_LEVELS = (LEVEL_STORE, LEVEL_GREEDY, LEVEL_LAZY, LEVEL_OPTIMAL)
 
-def encode(data, level: int = DEFAULT_LEVEL, **kwargs) -> bytes:
+_LEVEL_TUNING = {
+    LEVEL_GREEDY: dict(max_chain=16, nice_len=64),
+    LEVEL_LAZY: dict(max_chain=48, nice_len=128),
+    LEVEL_OPTIMAL: dict(max_chain=96, nice_len=1024),
+}
+
+
+def encode(data, level: int = DEFAULT_LEVEL, *,
+           max_dist: int = DEFAULT_MAX_DIST,
+           max_chain: int | None = None,
+           nice_len: int | None = None,
+           max_len: int = DEFAULT_MAX_LEN) -> bytes:
     """Compress `data` into a BOLT LZSS stream.
 
     `level` trades encode time for output size:
         0  literal runs only -- correct, never compresses
         1  greedy match finding
-        2  lazy match finding (one-byte lookahead)
-        3  optimal parse (default)
+        2  lazy match finding (one byte of lookahead)
+        3  optimal parse over the real cost model (default)
 
     The result always satisfies `decode(encode(x)) == x`.
     """
     data = bytes(data)
     if level == LEVEL_STORE:
         return _encode_store(data)
-    raise BoltLZSSError(f"unknown compression level {level!r}")
+    if level not in _LEVEL_TUNING:
+        raise BoltLZSSError(f"unknown compression level {level!r}")
+    if not data:
+        return b""
+
+    tuning = _LEVEL_TUNING[level]
+    finder = _MatchFinder(
+        data,
+        max_dist=max_dist,
+        max_chain=tuning["max_chain"] if max_chain is None else max_chain,
+        nice_len=tuning["nice_len"] if nice_len is None else nice_len,
+        max_len=max_len,
+    )
+    if level == LEVEL_OPTIMAL:
+        return _encode_optimal(data, finder)
+    return _encode_greedy(data, finder, lazy=(level == LEVEL_LAZY))
+
+
+def _flush_literals(out: bytearray, data: bytes, start: int, end: int) -> None:
+    """Emit data[start:end] as literal runs.
+
+    One long run always beats several short ones -- the run length costs a
+    control byte plus five bits of extension per five bits of magnitude,
+    while splitting costs a whole control byte each time -- so this emits a
+    single run whenever it can.
+    """
+    if end <= start:
+        return
+    _emit_literal(out, data, start, end - start)
+
+
+def _encode_greedy(data: bytes, finder: _MatchFinder, lazy: bool) -> bytes:
+    """Take the best match at each position; optionally look one byte ahead.
+
+    "Best" is the largest saving, not the longest match: a nearer match can
+    be cheaper than a longer far one, because distance is paid for in whole
+    extension bytes.
+    """
+    n = len(data)
+    out = bytearray()
+    lit_start = 0
+    pos = 0
+    inserted = 0        # every position below this is already in the chains
+
+    def advance(upto):
+        """Insert hash entries up to (not including) `upto`, exactly once.
+
+        Inserting a position twice would make it its own predecessor and the
+        chain walk would never terminate, so the watermark is not optional.
+        """
+        nonlocal inserted
+        while inserted < upto:
+            finder.insert(inserted)
+            inserted += 1
+
+    def best_at(p):
+        """(gain, length, dist) for the most profitable match at p."""
+        best = (0, 0, 0)
+        for length, dist in finder.find(p, detail=16):
+            cost = reference_cost(dist, length)
+            if cost is None:
+                continue
+            gain = length - cost
+            if gain > best[0] or (gain == best[0] and length > best[1]):
+                best = (gain, length, dist)
+        return best
+
+    while pos < n:
+        gain, length, dist = best_at(pos)
+        # Require two bytes of saving: taking a match also terminates the
+        # literal run, and the run that resumes afterwards needs a fresh
+        # control byte.
+        if gain >= 2:
+            if lazy and pos + 1 < n:
+                advance(pos + 1)
+                if best_at(pos + 1)[0] > gain:
+                    pos += 1
+                    continue
+            _flush_literals(out, data, lit_start, pos)
+            _emit_reference(out, dist, length)
+            pos += length
+            advance(min(pos, n))
+            lit_start = pos
+        else:
+            advance(pos + 1)
+            pos += 1
+
+    _flush_literals(out, data, lit_start, n)
+    return bytes(out)
+
+
+# Literal-run cost tiers: (longest run at this tier, extension bytes used).
+# A run of L bytes costs L + 1 + t.  The bounds come straight from the field
+# widths: ((ext_run << 4) | 0x0F) + 1 with ext_run holding 5*t bits.
+def _literal_tiers(n: int):
+    tiers = []
+    for t in range(0, 5):
+        span = (((1 << (BITS_RUN_EXT * t)) - 1) << BITS_LIT_LEN | 0x0F) + 1
+        tiers.append((span, t))
+        if span >= n:
+            break
+    return tiers
+
+
+def _encode_optimal(data: bytes, finder: _MatchFinder) -> bytes:
+    """Shortest-path parse over the format's real cost model.
+
+    Nodes are byte positions, edges are operations, edge weights are exactly
+    what the operation costs on the wire.  Two things make this less routine
+    than the usual LZ optimal parse:
+
+      * A literal run's cost is not the sum of its bytes -- it has a control
+        byte plus a step function of extension bytes -- so literal edges are
+        relaxed with a sliding-window minimum per cost tier rather than one
+        edge per byte.
+
+      * A back-reference's cost depends on the length *and* the distance
+        together, through op_count, so `reference_cost` has to be consulted
+        per candidate rather than assumed monotone.
+    """
+    from collections import deque
+
+    n = len(data)
+    inf = float("inf")
+    best = [inf] * (n + 1)
+    best[0] = 0
+    from_pos = [0] * (n + 1)
+    ref_dist = [0] * (n + 1)       # 0 marks a literal-run edge
+
+    tiers = _literal_tiers(n)
+    windows = [deque() for _ in tiers]
+
+    for i in range(0, n + 1):
+        if i > 0:
+            # ---- literal-run edges landing on i -------------------------
+            for (span, t), dq in zip(tiers, windows):
+                lo = i - span
+                while dq and dq[0][0] < lo:
+                    dq.popleft()
+                if dq:
+                    j, v = dq[0]
+                    cand = v + i + 1 + t
+                    if cand < best[i]:
+                        best[i] = cand
+                        from_pos[i] = j
+                        ref_dist[i] = 0
+
+        cur = best[i]
+        if cur == inf:
+            continue
+        if i < n:
+            # best[i] is final now: every edge into i came from a smaller
+            # index and has already been relaxed.
+            key = cur - i
+            for dq in windows:
+                while dq and dq[-1][1] >= key:
+                    dq.pop()
+                dq.append((i, key))
+
+            # ---- back-reference edges leaving i -------------------------
+            for length, dist in finder.find(i):
+                cost = reference_cost(dist, length)
+                if cost is None:
+                    continue
+                j = i + length
+                cand = cur + cost
+                if cand < best[j]:
+                    best[j] = cand
+                    from_pos[j] = i
+                    ref_dist[j] = dist
+            finder.insert(i)
+
+    if best[n] == inf:                       # unreachable in practice
+        raise BoltLZSSError("optimal parse failed to reach the end of input")
+
+    # ---- walk the path back and emit -----------------------------------
+    path = []
+    j = n
+    while j > 0:
+        i = from_pos[j]
+        path.append((i, j, ref_dist[j]))
+        j = i
+    path.reverse()
+
+    out = bytearray()
+    for i, j, dist in path:
+        if dist:
+            _emit_reference(out, dist, j - i)
+        else:
+            _emit_literal(out, data, i, j - i)
+    return bytes(out)
 
 
 def _encode_store(data: bytes) -> bytes:

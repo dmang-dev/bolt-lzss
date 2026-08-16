@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bolt_lzss as B
 
 # Every compression level that must satisfy decode(encode(x)) == x.
-LEVELS = (B.LEVEL_STORE,)
+LEVELS = B.ALL_LEVELS
 
 
 # ---------------------------------------------------------------------------
