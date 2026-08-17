@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 3.9 is the declared floor in pyproject. The codec is stdlib-only and
+        # uses `from __future__ import annotations` throughout, so nothing here
+        # should need anything newer -- but the floor is a claim, and this is
+        # what checks it rather than trusting it.
+        python-version: ["3.9", "3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install .
+
+      # The ROM-dependent tests skip themselves when no cartridge is present,
+      # which is always the case here: no game data is in this repository and
+      # none is ever downloaded. Roughly 30 of the 37 tests run on CI; the rest
+      # need a ROM the maintainer supplies locally.
+      - name: Run tests
+        run: python test_bolt_lzss.py -v
+
+      - name: CLI round trip
+        shell: bash
+        run: |
+          python bolt_lzss.py encode README.md /tmp/r.bolt
+          python bolt_lzss.py decode /tmp/r.bolt /tmp/r.raw
+          cmp README.md /tmp/r.raw
+          echo "round trip ok"
