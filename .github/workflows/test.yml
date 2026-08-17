@@ -13,11 +13,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        # 3.9 is the declared floor in pyproject. The codec is stdlib-only and
-        # uses `from __future__ import annotations` throughout, so nothing here
-        # should need anything newer -- but the floor is a claim, and this is
-        # what checks it rather than trusting it.
-        python-version: ["3.9", "3.11", "3.13"]
+        # 3.11 is the declared floor in pyproject, and every supported version
+        # is tested rather than sampled -- the floor and the ceiling are both
+        # claims this package makes on PyPI, and a version number there is
+        # immutable once uploaded.
+        #
+        # The floor is 3.11 because 3.9 reached end of life in October 2025 and
+        # 3.10 does so in October 2026. The codec itself is stdlib-only and
+        # would run on older interpreters; there is just no reason to promise
+        # support for versions that no longer receive security fixes.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4

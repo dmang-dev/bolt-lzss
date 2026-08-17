@@ -193,6 +193,11 @@ pip install git+https://github.com/dmang-dev/lzss-enc
 
 which also puts a `bolt-lzss` command on your `$PATH`.
 
+Python 3.11 or newer, tested on 3.11 through 3.14 across Linux and Windows.
+The codec uses nothing that would trouble an older interpreter — the floor is
+just where security support is, since 3.9 went end of life in October 2025 and
+3.10 follows in October 2026.
+
 ### From the shell
 
 ```bash
@@ -238,10 +243,10 @@ Three support files come along for the ride:
   operations it emitted. Every number in the section above comes from it.
 
 ```
-py -3.13 bench_rom.py    --rom /path/to/rom.n64 --all-levels
-py -3.13 analyse_rom.py  --rom /path/to/rom.n64
-py -3.13 -m unittest                      # ROM tests skip if no ROM is set
-BOLT_ROM=/path/to/rom.n64 py -3.13 -m unittest
+python bench_rom.py   --rom /path/to/rom.n64 --all-levels
+python analyse_rom.py --rom /path/to/rom.n64
+python -m unittest                      # ROM tests skip if no ROM is set
+BOLT_ROM=/path/to/rom.n64 python -m unittest
 ```
 
 ---
@@ -342,7 +347,7 @@ because it costs nothing.
 
 ## Correctness
 
-`py -3.13 -m unittest` runs the suite. Everything needing game data skips
+`python -m unittest` runs the suite. Everything needing game data skips
 cleanly when there is none, so a bare checkout passes on a machine that has
 never seen a cartridge.
 

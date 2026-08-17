@@ -8,7 +8,7 @@ name = "bolt-lzss"
 version = "0.1.0"
 description = "Encoder and decoder for the LZSS variant in Mass Media's BOLT archives"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "dmang-dev" }]
@@ -17,6 +17,11 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
     "Topic :: System :: Archiving :: Compression",
     "Topic :: Software Development :: Disassemblers",
 ]
