@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bolt-lzss"
-version = "0.1.0"
+version = "0.2.0"
 description = "Encoder and decoder for the LZSS variant in Mass Media's BOLT archives"
 readme = "README.md"
 requires-python = ">=3.11"

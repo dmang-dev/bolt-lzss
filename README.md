@@ -135,6 +135,48 @@ stop the extension-byte machinery from eating the gains it enables.
 
 ---
 
+## Emission order is a compatibility constraint
+
+Nothing in the bitstream description above says what order extension bytes must
+come in. Any order that reconstructs the same accumulators decodes to the same
+output, and a decoder written from that description accepts all of them.
+
+The cartridge's decoder does not. It requires one total order —
+
+```
+dual (1001xxxx)  ->  offset (11xxxxxx)  ->  run (101xxxxx)  ->  terminal
+```
+
+— and it will not accept more than **two** offset-extension bytes before a
+single back-reference.
+
+This is not inferable from the format; it came from profiling every compressed
+entry on the StarCraft 64 cartridge and then confirming it on the real engine:
+
+| pattern before a back-reference | cartridge | this encoder before 0.2.0 |
+|---|---|---|
+| `dual, offset` | 12.08% | 0% |
+| `offset, dual` | 0% | 3.01% |
+| `offset, offset, offset` | never | present |
+
+The arithmetic corroborates the cap. The widest offset accumulator anywhere on
+the cartridge is 15,481 — exactly the 14 bits that one dual byte plus two
+offset bytes provide. Three offset bytes would express 18, and nothing on the
+cartridge ever does.
+
+**Versions before 0.2.0 emitted offset bytes first**, and so produced streams
+that round-trip perfectly through this module's own decoder and hang StarCraft
+64 on its loading screen. If you are building a ROM, you need 0.2.0 or later.
+
+There is a general lesson in it. For a codec whose real consumer is someone
+else's decoder, `decode(encode(x)) == x` measured against *your own* decoder is
+not a correctness test — it only proves the two agree with each other. Both can
+be wrong together, and here they were, for every stream the encoder had ever
+produced. The test that caught it compares against the original encoder's
+output rather than against this one's decoder.
+
+---
+
 ## What the cartridge's own encoder does
 
 Having an encoder makes it possible to ask what the original one was like.

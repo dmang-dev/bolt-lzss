@@ -132,7 +132,7 @@ __all__ = [
     "MIN_MATCH",
 ]
 
-__version__ = "1.0.0"
+__version__ = "0.2.0"
 
 
 class BoltLZSSError(ValueError):
@@ -328,6 +328,14 @@ def _emit_literal(out: bytearray, src, pos: int, run: int) -> None:
 _MAX_EXT = 12
 
 
+# The cartridge never chains more than two offset-extension bytes before a
+# back-reference, and its widest offset accumulator is 15,481 -- exactly the
+# 14 bits that one dual byte plus two offset bytes provide.  Three offset
+# bytes would express 18, which nothing on the cartridge does and which the
+# hardware decoder rejects.
+MAX_OFF_EXT = 2
+
+
 def _plan_reference(dist: int, length: int):
     """Work out how to spell a (distance, length) back-reference.
 
@@ -369,12 +377,18 @@ def _plan_reference(dist: int, length: int):
             need_run = max(0, bits_run - BITS_DUAL * n_dual)
             n_off = -(-need_off // BITS_OFF_EXT)
             n_run = -(-need_run // BITS_RUN_EXT)
+            if n_off > MAX_OFF_EXT:
+                continue                    # more dual bytes needed instead
             if n_off + n_run + n_dual > k:
                 continue
-            # Spend any slack on zero-valued offset bytes; leading zeros in
-            # the accumulator are harmless.
-            n_off += k - (n_off + n_run + n_dual)
-            return n_off, n_dual, n_run, v_off, v_run, lo, hi
+            # Spend any slack on zero-valued DUAL bytes at the very front.
+            # Both accumulators are zero there, so `acc = (0 << 2) | 0` is a
+            # genuine no-op.  Padding with zero offset bytes instead would
+            # also be arithmetically harmless, but it would put an offset byte
+            # ahead of a dual byte -- an ordering the cartridge never emits
+            # and the hardware decoder does not accept.  See _emit_reference.
+            n_pad = k - (n_off + n_run + n_dual)
+            return n_off, n_dual, n_run, v_off, v_run, lo, hi, n_pad
     return None
 
 
@@ -406,8 +420,10 @@ def _cost_by_off_bits(bits_off: int, length: int) -> int | None:
         for n_dual in range(0, k + 1):
             need_off = max(0, bits_off - BITS_DUAL * n_dual)
             need_run = max(0, bits_run - BITS_DUAL * n_dual)
-            if (-(-need_off // BITS_OFF_EXT)
-                    + -(-need_run // BITS_RUN_EXT) + n_dual) <= k:
+            n_off = -(-need_off // BITS_OFF_EXT)
+            if n_off > MAX_OFF_EXT:
+                continue
+            if n_off + -(-need_run // BITS_RUN_EXT) + n_dual <= k:
                 result = k + 1
                 break
         if result is not None:
@@ -431,20 +447,32 @@ def _emit_reference(out: bytearray, dist: int, length: int) -> None:
         raise BoltLZSSError(
             f"back-reference dist={dist} len={length} is not representable"
         )
-    n_off, n_dual, n_run, v_off, v_run, lo, hi = plan
+    n_off, n_dual, n_run, v_off, v_run, lo, hi, n_pad = plan
 
-    # Emission order is: offset bytes, dual bytes, run bytes, terminal byte.
-    # Each accumulator sees its bit groups in that same relative order, so
-    # split the values to match.
-    off_groups = _bit_groups(v_off, [BITS_OFF_EXT] * n_off
-                             + [BITS_DUAL] * n_dual)
+    # Emission order is: dual bytes, offset bytes, run bytes, terminal byte.
+    #
+    # Any order that reconstructs the same accumulators decodes correctly under
+    # a from-spec decoder, and this encoder originally emitted offset bytes
+    # first.  The cartridge's decoder does not accept that.  Profiling every
+    # compressed entry on the cartridge shows the original encoder obeys one
+    # total order without exception -- dual, then offset, then run.  It emits
+    # `dual, offset` before 12% of its back-references and `offset, dual`
+    # before none of them, and it never chains three offset bytes.  Streams
+    # that violate the order round-trip perfectly through this module's own
+    # decoder and hang the real game on its loading screen.
+    #
+    # So the emission order here is a compatibility constraint, not a taste.
+    off_groups = _bit_groups(v_off, [BITS_DUAL] * n_dual
+                             + [BITS_OFF_EXT] * n_off)
     run_groups = _bit_groups(v_run, [BITS_DUAL] * n_dual
                              + [BITS_RUN_EXT] * n_run)
 
-    for i in range(n_off):
-        out.append(OP_OFF_EXT | off_groups[i])
+    for _ in range(n_pad):
+        out.append(OP_DUAL)                 # zero-valued: both accumulators 0
     for i in range(n_dual):
-        out.append(OP_DUAL | (off_groups[n_off + i] << 2) | run_groups[i])
+        out.append(OP_DUAL | (off_groups[i] << 2) | run_groups[i])
+    for i in range(n_off):
+        out.append(OP_OFF_EXT | off_groups[n_dual + i])
     for i in range(n_run):
         out.append(OP_RUN_EXT | run_groups[n_dual + i])
     out.append((hi << 4) | lo)
