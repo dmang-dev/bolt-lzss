@@ -488,7 +488,18 @@ _HASH_MASK = _HASH_SIZE - 1
 
 # Distances above this are never searched.  Six offset-extension bytes could
 # express far more, but nothing in a cartridge needs it.
-DEFAULT_MAX_DIST = 1 << 22
+# The hardware decoder's offset accumulator tops out at 14 bits: the widest
+# value anywhere on the StarCraft 64 cartridge is 15,481, and 14 bits is
+# exactly what MAX_OFF_EXT offset bytes plus one dual byte provide. That makes
+# the furthest safely referenceable distance (16383 << 4 | 15) + 1, and the
+# cartridge's own longest back-reference is 262,128 -- just inside it.
+#
+# More dual bytes could express more, but nothing on the cartridge does, and a
+# distance the hardware's window cannot reach would read the wrong bytes even
+# when the encoding itself is legal. Staying inside the demonstrated envelope
+# costs a little ratio on inputs above 256 KiB and is the difference between a
+# stream that plays and one that does not.
+DEFAULT_MAX_DIST = 262144
 
 # Longest match the finder will bother measuring.
 DEFAULT_MAX_LEN = 1 << 16

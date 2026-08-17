@@ -270,8 +270,13 @@ class TestReferencePlanning(unittest.TestCase):
     def test_length_floor_matches_the_distance_class(self):
         """Each extension byte a distance needs raises the minimum length."""
         # (largest distance needing k extension bytes, resulting floor)
+        # Each class is the largest distance expressible with k extension
+        # bytes. The jump from 65536 to 262144 is only x4, not x64, because
+        # the fourth byte available is a dual byte contributing two bits --
+        # offset bytes are capped at MAX_OFF_EXT, which is what the cartridge
+        # does and what its decoder accepts.
         for max_dist, floor in ((16, 2), (1024, 3), (65536, 4),
-                                (1 << 22, 5)):
+                                (262144, 5), (1 << 20, 6)):
             self.assertIsNotNone(B.reference_cost(max_dist, floor),
                                  f"dist={max_dist} len={floor}")
             if floor > 2:
