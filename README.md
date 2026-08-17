@@ -188,7 +188,7 @@ it into your project is a perfectly good way to use it. If you would rather
 have it on the path:
 
 ```bash
-pip install git+https://github.com/dmang-dev/lzss-enc
+pip install git+https://github.com/dmang-dev/bolt-lzss
 ```
 
 which also puts a `bolt-lzss` command on your `$PATH`.

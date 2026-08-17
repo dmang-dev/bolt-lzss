@@ -33,7 +33,7 @@ jobs:
     # Trusted Publishing: PyPI verifies this workflow's OIDC identity, so
     # there is no API token to create, paste into a secret, or leak. Configure
     # it once at https://pypi.org/manage/account/publishing/ against
-    # owner=dmang-dev, repo=lzss-enc, workflow=publish.yml, environment=pypi.
+    # owner=dmang-dev, repo=bolt-lzss, workflow=publish.yml, environment=pypi.
     environment: pypi
     permissions:
       id-token: write
